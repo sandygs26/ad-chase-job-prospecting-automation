@@ -1,0 +1,20 @@
+# Secrets & local config
+.env
+*.env
+*.key
+
+# Runtime data (never commit)
+n8n_DATA/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+Annonces_PDF/
+monthly_keeps/
+excel_clients/
+*.log
+
+# OS / editor
+Thumbs.db
+.DS_Store
+.vscode/
+.idea/

@@ -1,0 +1,924 @@
+{
+  "name": "AD Chase V5 - Job Prospecting Pipeline",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## 1 · Triggers & region config\nWebhook (scheduled run) or manual run. Picks the search URLs of the region; Monday uses 3-day windows.",
+        "height": 560,
+        "width": 1100,
+        "color": 7
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -1760,
+        280
+      ],
+      "id": "786605b0-f194-4c9c-a0d3-f9bc14c98f2b",
+      "name": "Note - 1 · Triggers & region config"
+    },
+    {
+      "parameters": {
+        "content": "## 2 · Parallel scraping\nOne HTTP call per job board to the Playwright backend.",
+        "height": 1440,
+        "width": 330,
+        "color": 5
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -60,
+        -380
+      ],
+      "id": "5415713e-d9c2-4ba1-a6b4-2c88b9763cc1",
+      "name": "Note - 2 · Parallel scraping"
+    },
+    {
+      "parameters": {
+        "content": "## 3 · Merge & pre-filter\nOne offer per company (best salary); keyword filters cut LLM calls.",
+        "height": 580,
+        "width": 720,
+        "color": 4
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        820,
+        190
+      ],
+      "id": "ebf25748-41cf-47b0-8fd7-d7d99a73f9dd",
+      "name": "Note - 3 · Merge & pre-filter"
+    },
+    {
+      "parameters": {
+        "content": "## 4 · AI screening\nDeepSeek returns KEEP / IGNORE as strict JSON.",
+        "height": 580,
+        "width": 1000,
+        "color": 6
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1580,
+        190
+      ],
+      "id": "3787a7cf-1b72-4c45-a88a-266ed6c9b0fc",
+      "name": "Note - 4 · AI screening"
+    },
+    {
+      "parameters": {
+        "content": "## 5 · Client check & monthly dedupe\nSkip existing clients (optional) and companies already kept this month.",
+        "height": 430,
+        "width": 1700,
+        "color": 3
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        880,
+        900
+      ],
+      "id": "00b581cb-66d0-4f69-af95-9e64914e626c",
+      "name": "Note - 5 · Client check & monthly dedupe"
+    },
+    {
+      "parameters": {
+        "content": "## 6 · PDF export & report\nBatch export of kept offers as PDFs, then run report.",
+        "height": 430,
+        "width": 1700,
+        "color": 2
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        880,
+        1440
+      ],
+      "id": "89c8aaea-029a-4466-a18d-6d4e0681f93b",
+      "name": "Note - 6 · PDF export & report"
+    },
+    {
+      "parameters": {
+        "jsCode": "// The Merge node returns an array of items, each holding an \"offers\" list\n// Structure: [ { offers: [...] }, { offers: [...] } ]\n\nlet allOffers = [];\n\n// Merge output (array of items)\nif (Array.isArray($input.all())) {\n  // Collect the offers of every merged item\n  $input.all().forEach(item => {\n    if (item.json && item.json.offers && Array.isArray(item.json.offers)) {\n      allOffers = allOffers.concat(item.json.offers);\n    }\n  });\n}\n// Fallback: single object\nelse if ($json.offers && Array.isArray($json.offers)) {\n  allOffers = $json.offers;\n}\n\nconst offers = allOffers;\n\nfunction extractSalary(text){\n    if(!text) return 0;\n    const nums = text.match(/\\d+/g);\n    if(!nums) return 0;\n    return Math.max(...nums.map(Number));\n}\n\n// ============================================================\n// Deduplicate by company (best salary kept)\n// ============================================================\nconst companies = {};\nfor(const offer of offers){\n    const company = (offer.entreprise || \"\").trim().toLowerCase();\n    if(!company) continue;\n    const salary = extractSalary(offer.remuneration);\n    if(!companies[company] || salary > companies[company].salary_num){\n        companies[company] = { ...offer, salary_num: salary };\n    }\n}\nconst result = Object.values(companies);\n\n// ============================================================\n// MECHANICAL PRE-FILTER (before calling the LLM, to save tokens)\n// ============================================================\n\nconst EXCLUDED_TITLE_KEYWORDS = [\n  // Medical\n  'médecin', 'cardiologue', 'psychiatre', 'chirurgien', 'infirmier',\n  'pharmacien', 'kinésithérapeute', 'orthophoniste', 'aide-soignant',\n  // IT\n  'développeur', 'devops', 'data scientist', 'cybersécurité', 'informatique',\n  'ingénieur logiciel', 'ingénieur développement',\n  // ERP / complex IT systems\n  'consultant erp', 'consultant sap', 'consultant fonctionnel',\n  'chef de projet erp', 'chef de projet sap', 'chef de projet si',\n  'administrateur sap', 'intégrateur erp', 'mco erp',\n  // Operational / temp roles\n  'ouvrier', 'cariste', 'magasinier', 'opérateur', 'monteur',\n  'manutentionnaire', 'conducteur de ligne', 'agent de production',\n  'planificateur', 'ordonnancement', 'préparateur de commandes',\n  'chauffeur', 'livreur'\n];\n\nconst EXCLUDED_COMPANY_KEYWORDS = [\n  // Generic sectors\n  'association', 'fondation',\n  'mutuelle', 'mutuelles', 'assurance', 'assurances',\n  'ehpad', 'clinique', 'hôpital', 'hopital', 'chu', 'centre hospitalier',\n  'cabinet', 'conseil', 'consulting', 'engineering', 'ingénierie',\n  'hôtel', 'hotel', 'restaurant', 'auberge',\n  'immobilier', 'immobilière',\n  'mairie', 'urssaf', 'cci', 'afpa', 'pôle emploi', 'collectivité',\n  'banque', 'crédit', 'caisse d\\'épargne',\n  // Temp agencies / confidential postings (partial match)\n  'interim', 'intérim', 'confidentiel',\n  // Add your own company names to exclude here\n  // (the private blacklist used in production is not published)\n];\n\nconst EXCLUDED_DESC_KEYWORDS = [\n  'assistance technique', 'engineering services',\n  'médico-social', 'établissement de santé', 'établissement médico-social',\n  'compagnie d\\'assurance', 'sinistres', 'expertise assurance',\n  'cabinet de conseil', 'cabinet de recrutement',\n  'agence immobilière', 'syndic',\n  'secteur associatif', 'association loi 1901',\n  'collectivité territoriale', 'service public', 'fonction publique',\n  'hébergement touristique', 'restauration collective',\n  // ERP / complex IT\n  'sap', 'erp', 'oracle', 'salesforce', 'dynamics 365', 'progiciel',\n  'intégration système d\\'information', 'migration erp',\n  'éditeur de logiciel', 'éditeur logiciel'\n];\n\nfunction textIncludesAny(text, keywords) {\n  return keywords.some(kw => text.includes(kw));\n}\n\nfunction shouldPreFilter(item) {\n  const titre = (item.titre || '').toLowerCase();\n  const entreprise = (item.entreprise || '').toLowerCase();\n  const desc = (item.description || '').toLowerCase();\n\n  if (textIncludesAny(titre, EXCLUDED_TITLE_KEYWORDS)) return true;\n  if (textIncludesAny(entreprise, EXCLUDED_COMPANY_KEYWORDS)) return true;\n  if (textIncludesAny(desc, EXCLUDED_DESC_KEYWORDS)) return true;\n\n  return false;\n}\n\nconst filtered = result.filter(item => !shouldPreFilter(item));\n\nreturn [{\n    json: {\n        TOTAL_AFTER_DEDUPE: filtered.length,\n        OFFERS: filtered\n    }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1264,
+        576
+      ],
+      "id": "274c64c0-7316-4504-9cf6-084cc71c7493",
+      "name": "Dedupe by Company & Pre-filter"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.deepseek.com/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{\n  JSON.stringify({\n    \"model\": \"deepseek-chat\",\n    \"temperature\": 0.1,\n    \"response_format\": { \"type\": \"json_object\" },\n    \"messages\": [\n      {\n        \"role\": \"system\",\n        \"content\": \"Filtre offres cadre. JSON uniquement: {\\\"decision\\\":\\\"KEEP ou IGNORE\\\",\\\"reason\\\":\\\"1 phrase\\\"}\\n\\nIGNORE secteur: association|médical|social|banque|assurance|conseil/cabinet/consulting/engineering/assistance technique|hôtellerie|immobilier|public(mairie/URSSAF/CCI/pôle emploi)\\nIGNORE poste: IT/dev/data/cyber|technicien|dessinateur|directeur magasin|opérationnel/manuel(ouvrier/cariste/magasinier/opérateur/monteur)\\nIGNORE si description contient: conseil|cabinet|consulting|engineering services|opensourcing.fr|assistance technique\\n\\nKEEP si titre contient: Directeur|Responsable|Manager|Head of|RH|HR|Commercial|Finance|Controller|Support ET secteur valide\\nSi pas de mot-clé titre: IGNORE sauf si poste non-intérimaire évident\\nVérifier vrai secteur via description, pas seulement nom entreprise\"\n      },\n      {\n        \"role\": \"user\",\n        \"content\": $json.entreprise + \"|\" + $json.titre + \"|\" + $json.remuneration + \"|\" + ($json.description || \"\").substring(0, 300)\n      }\n    ]\n  })\n}}",
+        "options": {
+          "timeout": 60000
+        },
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth"
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1984,
+        576
+      ],
+      "id": "c8ab4a4d-d16b-45e1-b82e-fbba3b8a3b49",
+      "name": "AI Screening (DeepSeek)",
+      "notes": "Create a 'Header Auth' credential: name = Authorization, value = Bearer <your DeepSeek API key>."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8080/check-client",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"entreprise\":\"{{$json.entreprise}}\"\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1264,
+        1088
+      ],
+      "id": "198ee6d0-b657-48af-a51f-b454817c19d2",
+      "name": "Existing Client Check (optional, disabled)",
+      "disabled": true,
+      "notes": "Calls the local Flask/Playwright backend (see docs/backend-api.md)."
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "OFFERS",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [
+        1616,
+        576
+      ],
+      "id": "4a88d0b8-fbd3-464d-b232-7911fbb0ae26",
+      "name": "Split Offers"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "9b3c8e12-37b2-44f1-9c51-613ade7fd998",
+              "leftValue": "={{$json.is_client}}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        2000,
+        1088
+      ],
+      "id": "81aa57b7-a363-4864-b2f0-6ade3ba8d1eb",
+      "name": "Not an Existing Client? (optional, disabled)",
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8080/check-keep",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n\"company\":\"{{ $json.entreprise }}\",\n\"salary\":\"{{$json.remuneration}}\",\n\"region\": \"{{ $json.region }}\"\n}",
+        "options": {
+          "timeout": 2147483647
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        2336,
+        1104
+      ],
+      "id": "c2321020-4f1b-4676-a68a-5ce473c195bf",
+      "name": "Monthly Dedupe Check",
+      "notes": "Calls the local Flask/Playwright backend (see docs/backend-api.md)."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "7e06e704-834f-47b9-bb94-2384bed527ef",
+              "leftValue": "={{$json.decision}}",
+              "rightValue": "KEEP",
+              "operator": {
+                "type": "string",
+                "operation": "equals",
+                "name": "filter.operator.equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        912,
+        1104
+      ],
+      "id": "959b221c-3999-407c-be8b-b981ef51150f",
+      "name": "AI Decision = KEEP?"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "ec58ed0c-712a-41fd-889f-f9c1cce8df30",
+              "leftValue": "={{ $json.decision }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1248,
+        1632
+      ],
+      "id": "3d7578b5-33c1-4760-9323-70e9dd8b6cf7",
+      "name": "New This Month?"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8080/download-pdf-batch",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"region_num\": \"{{ $input.first().json.region }}\",\n  \"annonces\": {{ JSON.stringify($input.all().map(item => ({ \"entreprise\": item.json.entreprise, \"titre\": item.json.titre, \"url\": item.json.url, \"remuneration\": item.json.remuneration }))) }}\n}",
+        "options": {
+          "timeout": 2147483647
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1600,
+        1616
+      ],
+      "id": "118baab5-87ad-4113-a227-eed2ac02fb7a",
+      "name": "Export Offers to PDF (batch)",
+      "executeOnce": true,
+      "retryOnFail": true,
+      "notes": "Calls the local Flask/Playwright backend (see docs/backend-api.md)."
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "let content = $json.choices[0].message.content;\n\ntry {\n\n  // normal parse\n  var result = JSON.parse(content);\n\n} catch(e) {\n\n  // strip invalid escapes, then retry\n  content = content\n    .replace(/\\\\'/g, \"'\")\n    .replace(/\\n/g, \" \")\n    .replace(/\\r/g, \" \");\n\n  result = JSON.parse(content);\n\n}\n\nreturn {\n  json: {\n\n    entreprise: $('Split Offers').item.json.entreprise,\n    titre: $('Split Offers').item.json.titre,\n    remuneration: $('Split Offers').item.json.remuneration,\n    lieu: $('Split Offers').item.json.lieu,\n    url: $('Split Offers').item.json.url,\n\n    decision: result.decision,\n    reason: result.reason\n\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2336,
+        576
+      ],
+      "id": "7e7cf190-c2ba-4e32-87fb-0291109256a0",
+      "name": "Attach AI Decision"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "return {\n  json: {\n    \n    entreprise: $('Not an Existing Client? (optional, disabled)').item.json.entreprise,\n    titre: $('Not an Existing Client? (optional, disabled)').item.json.titre,\n    remuneration: $('Not an Existing Client? (optional, disabled)').item.json.remuneration, \n    decision: $json.keep,\n    reason : $json.reason,\n    url : $('Not an Existing Client? (optional, disabled)').item.json.url,\n    region: $('Region Config & Search URLs').first().json.REGION\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        912,
+        1632
+      ],
+      "id": "71d228c4-30b7-4074-b90d-2738d9ad67e3",
+      "name": "Normalize Fields (monthly check)"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "return {\n  json: {\n    is_client: $json.is_client,\n    \n    entreprise: $('AI Decision = KEEP?').item.json.entreprise,\n    titre: $('AI Decision = KEEP?').item.json.titre,\n    remuneration: $('AI Decision = KEEP?').item.json.remuneration, \n    decision: $('AI Decision = KEEP?').item.json.decision,\n    reason : $('AI Decision = KEEP?').item.json.reason,\n    url: $('Attach AI Decision').item.json.url,\n    region: $('Region Config & Search URLs').first().json.REGION\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1616,
+        1088
+      ],
+      "id": "74534d2e-094a-48bf-8f8b-b36178887801",
+      "name": "Normalize Fields (client check)"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8080/create-report",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{\n  JSON.stringify({\n    \"region\": $('Region Config & Search URLs').first().json.REGION,\n    \"analysed\": $('Split Offers').all().length,\n    \"kept\": $json.Rapport[0].total,\n    \"pdfs\": $json.Rapport[0].total\n  })\n}}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        2320,
+        1616
+      ],
+      "id": "271e31cc-27ca-44d1-8ed3-eb6f0b02a398",
+      "name": "Create Run Report (disabled)",
+      "disabled": true,
+      "notes": "Calls the local Flask/Playwright backend (see docs/backend-api.md)."
+    },
+    {
+      "parameters": {
+        "aggregate": "aggregateAllItemData",
+        "destinationFieldName": "Rapport",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.aggregate",
+      "typeVersion": 1,
+      "position": [
+        1968,
+        1616
+      ],
+      "id": "0c349e25-4251-4e84-aa05-11da8bb7779f",
+      "name": "Aggregate Run Stats (disabled)",
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "numberInputs": 5
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        848,
+        528
+      ],
+      "id": "7f775df4-c58b-445f-a65a-cf69633424a8",
+      "name": "Merge Offer Lists",
+      "executeOnce": false
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8080/scrape",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"url\":\"{{ $json.URL_APEC }}\",\n  \"region_num\":\"{{ $json.REGION }}\"\n}",
+        "options": {
+          "timeout": 2147483647
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        0,
+        0
+      ],
+      "id": "262dac12-1927-40a9-a05f-7322f854afac",
+      "name": "Scrape APEC (disabled)",
+      "disabled": true,
+      "onError": "continueErrorOutput",
+      "notes": "Calls the local Flask/Playwright backend (see docs/backend-api.md)."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8080/scrape-hellowork",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"url\":\"{{ $json.url_hellowork }}\",\n  \"region_num\":\"{{ $json.REGION }}\"\n}",
+        "options": {
+          "timeout": 2147483647
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        0,
+        224
+      ],
+      "id": "b66db00c-2242-4780-ad13-dff699a32321",
+      "name": "Scrape HelloWork",
+      "notes": "Calls the local Flask/Playwright backend (see docs/backend-api.md)."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8080/scrape-ouestfrance",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"url\":\"{{ $json.url_ouestfrance }}\",\n  \"region_num\":\"{{ $json.REGION }}\"\n}",
+        "options": {
+          "timeout": 2147483647
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        0,
+        448
+      ],
+      "id": "0ba63c2e-dfa9-4d78-98a8-3615f7537384",
+      "name": "Scrape Ouest-France Emploi",
+      "notes": "Calls the local Flask/Playwright backend (see docs/backend-api.md)."
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ad-chase-trigger",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -1712,
+        640
+      ],
+      "id": "81fc8934-0aae-4eb6-891a-e6d185c5d568",
+      "name": "Webhook Trigger",
+      "webhookId": "3dfda046-32fe-4b21-9644-7c83472b7524"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Selected region\nconst regionText = $json.REGION;\nconst regionNumber = regionText.split('.')[0].trim();\n\n// Monday uses the 3-day URLs (covers the weekend), other days the 24h URLs\nconst today = new Date();\nconst dayOfWeek = today.getDay();\nconst urlType = (dayOfWeek === 1) ? 'urls_3j' : 'urls_24h';\n\n// Search URLs for the 12 regions, per job board\nconst config = {\n  \"1\": {\n    \"nom\": \"1. RHONES ALPES - AUVERGNE\",\n    \"urls_24h\": {\n      \"apec\": \"\",\n      \"hellowork\": \"https://www.hellowork.com/fr-fr/emploi/recherche.html?k=&k_autocomplete=&l=Auvergne-Rh%C3%B4ne-Alpes&l_autocomplete=http%3A%2F%2Fwww.rj.com%2Fcommun%2Flocalite%2Fregion%2F84&st=relevance&c=CDI&msa=30000&ray=20&d=h&et=Entreprises&f=Achat&f=Logistique_metiers_transport&f=Assistanat_admin_accueil&f=Dir_resp_centre_profit&f=Juridique_droit&f=RH_Personnel_Formation&f=BTP_gros_second_oeuvre&f=Bureau_etude_R_D&f=Commercial_technico_com&f=Commercial_particulier&f=Commercial_professionnel&f=Import_export_inter&f=Dir_management_resp&f=Ingenierie_agro_agri&f=Ingenierie_chimie_pharma_bio&f=Ingenierie_electro_tech&f=Ingenierie_meca_aero&f=Ingenierie_telecom&f=Marketing_com_graphisme&f=Production_gestion&f=Production_operateur&f=Qualite_securite_environnement\",\n      \"ouestfrance\": \"https://emploi.ouest-france.fr/recherche-emploi/?contract_type=CDI&locations=Auvergne-Rh%C3%B4ne-Alpes&salary_bucket_year=33+000+%E2%82%AC+et+plus&date_bucket=Depuis+24h\",\n      \"meteojob\": \"https://www.meteojob.com/jobsearch/offres-emploi?&typeContrat=CDI&salary_min=30000&regions=84&publication_period=1\",\n      \"cadreemploi\": \"https://www.cadreemploi.fr/emploi/recherche?term=&contract=CDI&salary=33000&location=Auvergne-Rh%C3%B4ne-Alpes&publication_period=1\"\n    },\n    \"urls_3j\": {\n      \"apec\": \"\",\n      \"hellowork\": \"https://www.hellowork.com/fr-fr/emploi/recherche.html?k=&k_autocomplete=&l=Auvergne-Rh%C3%B4ne-Alpes&l_autocomplete=http%3A%2F%2Fwww.rj.com%2Fcommun%2Flocalite%2Fregion%2F84&st=relevance&c=CDI&msa=30000&ray=20&d=d&et=Entreprises&f=Achat&f=Logistique_metiers_transport&f=Assistanat_admin_accueil&f=Dir_resp_centre_profit&f=Juridique_droit&f=RH_Personnel_Formation&f=BTP_gros_second_oeuvre&f=Bureau_etude_R_D&f=Commercial_technico_com&f=Commercial_particulier&f=Commercial_professionnel&f=Import_export_inter&f=Dir_management_resp&f=Ingenierie_agro_agri&f=Ingenierie_chimie_pharma_bio&f=Ingenierie_electro_tech&f=Ingenierie_meca_aero&f=Ingenierie_telecom&f=Marketing_com_graphisme&f=Production_gestion&f=Production_operateur&f=Qualite_securite_environnement\",\n      \"ouestfrance\": \"https://emploi.ouest-france.fr/recherche-emploi/?contract_type=CDI&date_bucket=Depuis+3+jours&locations=Auvergne-Rh%C3%B4ne-Alpes&salary_bucket_year=33+000+%E2%82%AC+et+plus\",\n      \"meteojob\": \"https://www.meteojob.com/jobsearch/offres-emploi?&typeContrat=CDI&salary_min=30000&regions=84&publication_period=3\",\n      \"cadreemploi\": \"https://www.cadreemploi.fr/emploi/recherche?term=&contract=CDI&salary=33000&location=Auvergne-Rh%C3%B4ne-Alpes&publication_period=3\"\n    }\n  },\n  \"2\": {\n    \"nom\": \"2. BRETAGNE\",\n    \"urls_24h\": {\n      \"apec\": \"\",\n      \"hellowork\": \"https://www.hellowork.com/fr-fr/emploi/recherche.html?k=&k_autocomplete=&l=Bretagne&l_autocomplete=http%3A%2F%2Fwww.rj.com%2Fcommun%2Flocalite%2Fregion%2F53&st=relevance&c=CDI&msa=30000&ray=20&d=h&et=Entreprises&f=Achat&f=Logistique_metiers_transport&f=Assistanat_admin_accueil&f=Dir_resp_centre_profit&f=Juridique_droit&f=RH_Personnel_Formation&f=BTP_gros_second_oeuvre&f=Bureau_etude_R_D&f=Commercial_technico_com&f=Commercial_particulier&f=Commercial_professionnel&f=Import_export_inter&f=Dir_management_resp&f=Ingenierie_agro_agri&f=Ingenierie_chimie_pharma_bio&f=Ingenierie_electro_tech&f=Ingenierie_meca_aero&f=Ingenierie_telecom&f=Marketing_com_graphisme&f=Production_gestion&f=Production_operateur&f=Qualite_securite_environnement\",\n      \"ouestfrance\": \"https://emploi.ouest-france.fr/recherche-emploi/?contract_type=CDI&date_bucket=Depuis+24h&locations=Bretagne&salary_bucket_year=33+000+%E2%82%AC+et+plus\",\n      \"meteojob\": \"https://www.meteojob.com/jobs?where=Bretagne&facetContract=CDI&facetSince=1\",\n      \"cadreemploi\": \"https://www.cadremploi.fr/emploi/liste_offres?reg=FR-E&salary=30&tyc=1\"\n    },\n    \"urls_3j\": {\n      \"apec\": \"\",\n      \"hellowork\": \"https://www.hellowork.com/fr-fr/emploi/recherche.html?k=&k_autocomplete=&l=Bretagne&l_autocomplete=http%3A%2F%2Fwww.rj.com%2Fcommun%2Flocalite%2Fregion%2F53&st=relevance&c=CDI&msa=30000&ray=20&d=d&et=Entreprises&f=Achat&f=Logistique_metiers_transport&f=Assistanat_admin_accueil&f=Dir_resp_centre_profit&f=Juridique_droit&f=RH_Personnel_Formation&f=BTP_gros_second_oeuvre&f=Bureau_etude_R_D&f=Commercial_technico_com&f=Commercial_particulier&f=Commercial_professionnel&f=Import_export_inter&f=Dir_management_resp&f=Ingenierie_agro_agri&f=Ingenierie_chimie_pharma_bio&f=Ingenierie_electro_tech&f=Ingenierie_meca_aero&f=Ingenierie_telecom&f=Marketing_com_graphisme&f=Production_gestion&f=Production_operateur&f=Qualite_securite_environnement\",\n      \"ouestfrance\": \"https://emploi.ouest-france.fr/recherche-emploi/?contract_type=CDI&date_bucket=Depuis+3+jours&locations=Bretagne&salary_bucket_year=33+000+%E2%82%AC+et+plus\",\n      \"meteojob\": \"https://www.meteojob.com/jobs?where=Bretagne&facetContract=CDI&facetSince=3\",\n      \"cadreemploi\": \"https://www.cadremploi.fr/emploi/liste_offres?reg=FR-E&salary=30&tyc=1\"\n    }\n  },\n  \"3\": {\n    \"nom\": \"3. PAYS DE LA LOIRE\",\n    \"urls_24h\": {\n      \"apec\": \"\",\n      \"hellowork\": \"https://www.hellowork.com/fr-fr/emploi/recherche.html?k=&k_autocomplete=&l=Pays+de+la+Loire&l_autocomplete=http%3A%2F%2Fwww.rj.com%2Fcommun%2Flocalite%2Fregion%2F52&st=relevance&c=CDI&msa=30000&ray=20&d=h&et=Entreprises&f=Achat&f=Logistique_metiers_transport&f=Assistanat_admin_accueil&f=Dir_resp_centre_profit&f=Juridique_droit&f=RH_Personnel_Formation&f=BTP_gros_second_oeuvre&f=Bureau_etude_R_D&f=Commercial_technico_com&f=Commercial_particulier&f=Commercial_professionnel&f=Import_export_inter&f=Dir_management_resp&f=Ingenierie_agro_agri&f=Ingenierie_chimie_pharma_bio&f=Ingenierie_electro_tech&f=Ingenierie_meca_aero&f=Ingenierie_telecom&f=Marketing_com_graphisme&f=Production_gestion&f=Production_operateur&f=Qualite_securite_environnement\",\n      \"ouestfrance\": \"https://emploi.ouest-france.fr/recherche-emploi/?contract_type=CDI&date_bucket=Depuis+24h&locations=Pays+de+la+Loire&salary_bucket_year=33+000+%E2%82%AC+et+plus\",\n      \"meteojob\": \"https://www.meteojob.com/jobsearch/offres-emploi?&typeContrat=CDI&salary_min=30000&regions=52&publication_period=1\",\n      \"cadreemploi\": \"https://www.cadreemploi.fr/emploi/recherche?term=&contract=CDI&salary=33000&location=Pays+de+la+Loire&publication_period=1\"\n    },\n    \"urls_3j\": {\n      \"apec\": \"\",\n      \"hellowork\": \"https://www.hellowork.com/fr-fr/emploi/recherche.html?k=&k_autocomplete=&l=Pays+de+la+Loire&l_autocomplete=http%3A%2F%2Fwww.rj.com%2Fcommun%2Flocalite%2Fregion%2F52&st=relevance&c=CDI&msa=30000&ray=20&d=d&et=Entreprises&f=Achat&f=Logistique_metiers_transport&f=Assistanat_admin_accueil&f=Dir_resp_centre_profit&f=Juridique_droit&f=RH_Personnel_Formation&f=BTP_gros_second_oeuvre&f=Bureau_etude_R_D&f=Commercial_technico_com&f=Commercial_particulier&f=Commercial_professionnel&f=Import_export_inter&f=Dir_management_resp&f=Ingenierie_agro_agri&f=Ingenierie_chimie_pharma_bio&f=Ingenierie_electro_tech&f=Ingenierie_meca_aero&f=Ingenierie_telecom&f=Marketing_com_graphisme&f=Production_gestion&f=Production_operateur&f=Qualite_securite_environnement\",\n      \"ouestfrance\": \"https://emploi.ouest-france.fr/recherche-emploi/?contract_type=CDI&date_bucket=Depuis+3+jours&locations=Pays+de+la+Loire&salary_bucket_year=33+000+%E2%82%AC+et+plus\",\n      \"meteojob\": \"https://www.meteojob.com/jobsearch/offres-emploi?&typeContrat=CDI&salary_min=30000&regions=52&publication_period=3\",\n      \"cadreemploi\": \"https://www.cadreemploi.fr/emploi/recherche?term=&contract=CDI&salary=33000&location=Pays+de+la+Loire&publication_period=3\"\n    }\n  },\n  \"4\": {\n    \"nom\": \"4. NORMANDIE\",\n    \"urls_24h\": {\n      \"apec\": \"\",\n      \"hellowork\": \"https://www.hellowork.com/fr-fr/emploi/recherche.html?k=&k_autocomplete=&l=Normandie&l_autocomplete=http%3A%2F%2Fwww.rj.com%2Fcommun%2Flocalite%2Fregion%2F28&st=relevance&c=CDI&msa=30000&ray=20&d=h&et=Entreprises&f=Achat&f=Logistique_metiers_transport&f=Assistanat_admin_accueil&f=Dir_resp_centre_profit&f=Juridique_droit&f=RH_Personnel_Formation&f=BTP_gros_second_oeuvre&f=Bureau_etude_R_D&f=Commercial_technico_com&f=Commercial_particulier&f=Commercial_professionnel&f=Import_export_inter&f=Dir_management_resp&f=Negociation_gest_immo&f=Ingenierie_agro_agri&f=Ingenierie_chimie_pharma_bio&f=Ingenierie_electro_tech&f=Ingenierie_meca_aero&f=Ingenierie_telecom&f=Marketing_com_graphisme&f=Production_gestion&f=Production_operateur&f=Qualite_securite_environnement\",\n      \"ouestfrance\": \"https://emploi.ouest-france.fr/recherche-emploi/?locations=Normandie&salary_bucket_year_id=33000&contract_type_id=CDI&date_bucket=Depuis+24h\",\n      \"meteojob\": \"https://www.meteojob.com/jobsearch/offres-emploi?&typeContrat=CDI&salary_min=30000&regions=28&publication_period=1\",\n      \"cadreemploi\": \"https://www.cadreemploi.fr/emploi/recherche?term=&contract=CDI&salary=33000&location=Normandie&publication_period=1\"\n    },\n    \"urls_3j\": {\n      \"apec\": \"\",\n      \"hellowork\": \"https://www.hellowork.com/fr-fr/emploi/recherche.html?k=&k_autocomplete=&l=Normandie&l_autocomplete=http%3A%2F%2Fwww.rj.com%2Fcommun%2Flocalite%2Fregion%2F28&st=relevance&c=CDI&msa=30000&ray=20&d=d&et=Entreprises&f=Achat&f=Logistique_metiers_transport&f=Assistanat_admin_accueil&f=Dir_resp_centre_profit&f=Juridique_droit&f=RH_Personnel_Formation&f=BTP_gros_second_oeuvre&f=Bureau_etude_R_D&f=Commercial_technico_com&f=Commercial_particulier&f=Commercial_professionnel&f=Import_export_inter&f=Dir_management_resp&f=Negociation_gest_immo&f=Ingenierie_agro_agri&f=Ingenierie_chimie_pharma_bio&f=Ingenierie_electro_tech&f=Ingenierie_meca_aero&f=Ingenierie_telecom&f=Marketing_com_graphisme&f=Production_gestion&f=Production_operateur&f=Qualite_securite_environnement\",\n      \"ouestfrance\": \"https://emploi.ouest-france.fr/recherche-emploi/?contract_type_id=CDI&date_bucket=Depuis+3+jours&locations=Normandie&salary_bucket_year_id=33000\",\n      \"meteojob\": \"https://www.meteojob.com/jobsearch/offres-emploi?&typeContrat=CDI&salary_min=30000&regions=28&publication_period=3\",\n      \"cadreemploi\": \"https://www.cadreemploi.fr/emploi/recherche?term=&contract=CDI&salary=33000&location=Normandie&publication_period=3\"\n    }\n  },\n  \"5\": {\n    \"nom\": \"5. CENTRE VAL DE LOIRE\",\n    \"urls_24h\": {\n      \"apec\": \"\",\n      \"hellowork\": \"https://www.hellowork.com/fr-fr/emploi/recherche.html?k=&k_autocomplete=&l=Centre-Val+de+Loire&l_autocomplete=http%3A%2F%2Fwww.rj.com%2Fcommun%2Flocalite%2Fregion%2F24&st=relevance&c=CDI&msa=30000&ray=20&d=h&et=Entreprises&f=Achat&f=Logistique_metiers_transport&f=Assistanat_admin_accueil&f=Dir_resp_centre_profit&f=Juridique_droit&f=RH_Personnel_Formation&f=BTP_gros_second_oeuvre&f=Bureau_etude_R_D&f=Commercial_technico_com&f=Commercial_particulier&f=Commercial_professionnel&f=Import_export_inter&f=Dir_management_resp&f=Ingenierie_agro_agri&f=Ingenierie_chimie_pharma_bio&f=Ingenierie_electro_tech&f=Ingenierie_meca_aero&f=Ingenierie_telecom&f=Marketing_com_graphisme&f=Production_gestion&f=Production_operateur&f=Qualite_securite_environnement\",\n      \"ouestfrance\": \"https://emploi.ouest-france.fr/recherche-emploi/?contract_type=CDI&date_bucket=Depuis+24h&locations=Centre-Val+de+Loire&salary_bucket_year=33+000+%E2%82%AC+et+plus\",\n      \"meteojob\": \"https://www.meteojob.com/jobsearch/offres-emploi?&typeContrat=CDI&salary_min=30000&regions=24&publication_period=1\",\n      \"cadreemploi\": \"https://www.cadreemploi.fr/emploi/recherche?term=&contract=CDI&salary=33000&location=Centre-Val+de+Loire&publication_period=1\"\n    },\n    \"urls_3j\": {\n      \"apec\": \"\",\n      \"hellowork\": \"https://www.hellowork.com/fr-fr/emploi/recherche.html?k=&k_autocomplete=&l=Centre-Val+de+Loire&l_autocomplete=http%3A%2F%2Fwww.rj.com%2Fcommun%2Flocalite%2Fregion%2F24&st=relevance&c=CDI&msa=30000&ray=20&d=d&et=Entreprises&f=Achat&f=Logistique_metiers_transport&f=Assistanat_admin_accueil&f=Dir_resp_centre_profit&f=Juridique_droit&f=RH_Personnel_Formation&f=BTP_gros_second_oeuvre&f=Bureau_etude_R_D&f=Commercial_technico_com&f=Commercial_particulier&f=Commercial_professionnel&f=Import_export_inter&f=Dir_management_resp&f=Ingenierie_agro_agri&f=Ingenierie_chimie_pharma_bio&f=Ingenierie_electro_tech&f=Ingenierie_meca_aero&f=Ingenierie_telecom&f=Marketing_com_graphisme&f=Production_gestion&f=Production_operateur&f=Qualite_securite_environnement\",\n      \"ouestfrance\": \"https://emploi.ouest-france.fr/recherche-emploi/?contract_type=CDI&date_bucket=Depuis+3+jours&locations=Centre-Val+de+Loire&salary_bucket_year=33+000+%E2%82%AC+et+plus\",\n      \"meteojob\": \"https://www.meteojob.com/jobsearch/offres-emploi?&typeContrat=CDI&salary_min=30000&regions=24&publication_period=3\",\n      \"cadreemploi\": \"https://www.cadreemploi.fr/emploi/recherche?term=&contract=CDI&salary=33000&location=Centre-Val+de+Loire&publication_period=3\"\n    }\n  },\n  \"6\": {\n    \"nom\": \"6. NOUVELLE AQUITAINE\",\n    \"urls_24h\": {\n      \"apec\": \"\",\n      \"hellowork\": \"https://www.hellowork.com/fr-fr/emploi/recherche.html?k=&k_autocomplete=&l=Nouvelle-Aquitaine&l_autocomplete=http%3A%2F%2Fwww.rj.com%2Fcommun%2Flocalite%2Fregion%2F75&st=relevance&c=CDI&msa=30000&ray=20&d=h&et=Entreprises&f=Achat&f=Logistique_metiers_transport&f=Assistanat_admin_accueil&f=Dir_resp_centre_profit&f=Juridique_droit&f=RH_Personnel_Formation&f=BTP_gros_second_oeuvre&f=Bureau_etude_R_D&f=Commercial_technico_com&f=Commercial_particulier&f=Commercial_professionnel&f=Import_export_inter&f=Dir_management_resp&f=Negociation_gest_immo&f=Ingenierie_agro_agri&f=Ingenierie_chimie_pharma_bio&f=Ingenierie_electro_tech&f=Ingenierie_meca_aero&f=Ingenierie_telecom&f=Marketing_com_graphisme&f=Production_gestion&f=Production_operateur&f=Qualite_securite_environnement\",\n      \"ouestfrance\": \"https://emploi.ouest-france.fr/recherche-emploi/?contract_type_id=CDI&date_bucket=Depuis+24h&locations=Nouvelle-Aquitaine&salary_bucket_year_id=33000\",\n      \"meteojob\": \"https://www.meteojob.com/jobsearch/offres-emploi?&typeContrat=CDI&salary_min=30000&regions=75&publication_period=1\",\n      \"cadreemploi\": \"https://www.cadreemploi.fr/emploi/recherche?term=&contract=CDI&salary=33000&location=Nouvelle-Aquitaine&publication_period=1\"\n    },\n    \"urls_3j\": {\n      \"apec\": \"\",\n      \"hellowork\": \"https://www.hellowork.com/fr-fr/emploi/recherche.html?k=&k_autocomplete=&l=Nouvelle-Aquitaine&l_autocomplete=http%3A%2F%2Fwww.rj.com%2Fcommun%2Flocalite%2Fregion%2F75&st=relevance&c=CDI&msa=30000&ray=20&d=d&et=Entreprises&f=Achat&f=Logistique_metiers_transport&f=Assistanat_admin_accueil&f=Dir_resp_centre_profit&f=Juridique_droit&f=RH_Personnel_Formation&f=BTP_gros_second_oeuvre&f=Bureau_etude_R_D&f=Commercial_technico_com&f=Commercial_particulier&f=Commercial_professionnel&f=Import_export_inter&f=Dir_management_resp&f=Negociation_gest_immo&f=Ingenierie_agro_agri&f=Ingenierie_chimie_pharma_bio&f=Ingenierie_electro_tech&f=Ingenierie_meca_aero&f=Ingenierie_telecom&f=Marketing_com_graphisme&f=Production_gestion&f=Production_operateur&f=Qualite_securite_environnement\",\n      \"ouestfrance\": \"https://emploi.ouest-france.fr/recherche-emploi/?contract_type_id=CDI&date_bucket=Depuis+3+jours&locations=Nouvelle-Aquitaine&salary_bucket_year_id=33000\",\n      \"meteojob\": \"https://www.meteojob.com/jobsearch/offres-emploi?&typeContrat=CDI&salary_min=30000&regions=75&publication_period=3\",\n      \"cadreemploi\": \"https://www.cadreemploi.fr/emploi/recherche?term=&contract=CDI&salary=33000&location=Nouvelle-Aquitaine&publication_period=3\"\n    }\n  },\n  \"7\": {\n    \"nom\": \"7. ILE DE FRANCE\",\n    \"urls_24h\": {\n      \"apec\": \"\",\n      \"hellowork\": \"https://www.hellowork.com/fr-fr/emploi/recherche.html?k=&k_autocomplete=&l=%C3%8Ele-de-France&l_autocomplete=http%3A%2F%2Fwww.rj.com%2Fcommun%2Flocalite%2Fregion%2F11&st=relevance&c=CDI&msa=30000&ray=20&d=h&et=Entreprises&f=Achat&f=Logistique_metiers_transport&f=Assistanat_admin_accueil&f=Dir_resp_centre_profit&f=Juridique_droit&f=RH_Personnel_Formation&f=BTP_gros_second_oeuvre&f=Bureau_etude_R_D&f=Commercial_technico_com&f=Commercial_particulier&f=Commercial_professionnel&f=Import_export_inter&f=Dir_management_resp&f=Ingenierie_agro_agri&f=Ingenierie_chimie_pharma_bio&f=Ingenierie_electro_tech&f=Ingenierie_meca_aero&f=Ingenierie_telecom&f=Marketing_com_graphisme&f=Production_gestion&f=Production_operateur&f=Qualite_securite_environnement\",\n      \"ouestfrance\": \"https://emploi.ouest-france.fr/recherche-emploi/?contract_type=CDI&date_bucket=Depuis+24h&locations=%C3%8Ele-de-France&salary_bucket_year=33+000+%E2%82%AC+et+plus\",\n      \"meteojob\": \"https://www.meteojob.com/jobsearch/offres-emploi?&typeContrat=CDI&salary_min=30000&regions=11&publication_period=1\",\n      \"cadreemploi\": \"https://www.cadreemploi.fr/emploi/recherche?term=&contract=CDI&salary=33000&location=%C3%8Ele-de-France&publication_period=1\"\n    },\n    \"urls_3j\": {\n      \"apec\": \"\",\n      \"hellowork\": \"https://www.hellowork.com/fr-fr/emploi/recherche.html?k=&k_autocomplete=&l=%C3%8Ele-de-France&l_autocomplete=http%3A%2F%2Fwww.rj.com%2Fcommun%2Flocalite%2Fregion%2F11&st=relevance&c=CDI&msa=30000&ray=20&d=d&et=Entreprises&f=Achat&f=Logistique_metiers_transport&f=Assistanat_admin_accueil&f=Dir_resp_centre_profit&f=Juridique_droit&f=RH_Personnel_Formation&f=BTP_gros_second_oeuvre&f=Bureau_etude_R_D&f=Commercial_technico_com&f=Commercial_particulier&f=Commercial_professionnel&f=Import_export_inter&f=Dir_management_resp&f=Ingenierie_agro_agri&f=Ingenierie_chimie_pharma_bio&f=Ingenierie_electro_tech&f=Ingenierie_meca_aero&f=Ingenierie_telecom&f=Marketing_com_graphisme&f=Production_gestion&f=Production_operateur&f=Qualite_securite_environnement\",\n      \"ouestfrance\": \"https://emploi.ouest-france.fr/recherche-emploi/?contract_type=CDI&date_bucket=Depuis+3+jours&locations=%C3%8Ele-de-France&salary_bucket_year=33+000+%E2%82%AC+et+plus\",\n      \"meteojob\": \"https://www.meteojob.com/jobsearch/offres-emploi?&typeContrat=CDI&salary_min=30000&regions=11&publication_period=3\",\n      \"cadreemploi\": \"https://www.cadreemploi.fr/emploi/recherche?term=&contract=CDI&salary=33000&location=%C3%8Ele-de-France&publication_period=3\"\n    }\n  },\n  \"8\": {\n    \"nom\": \"8. HAUTS DE FRANCE\",\n    \"urls_24h\": {\n      \"apec\": \"\",\n      \"hellowork\": \"https://www.hellowork.com/fr-fr/emploi/recherche.html?k=&k_autocomplete=&l=Hauts-de-France&l_autocomplete=http%3A%2F%2Fwww.rj.com%2Fcommun%2Flocalite%2Fregion%2F32&st=relevance&c=CDI&msa=30000&ray=20&d=h&et=Entreprises&f=Achat&f=Logistique_metiers_transport&f=Assistanat_admin_accueil&f=Dir_resp_centre_profit&f=Juridique_droit&f=RH_Personnel_Formation&f=BTP_gros_second_oeuvre&f=Bureau_etude_R_D&f=Commercial_technico_com&f=Commercial_particulier&f=Commercial_professionnel&f=Import_export_inter&f=Dir_management_resp&f=Ingenierie_agro_agri&f=Ingenierie_chimie_pharma_bio&f=Ingenierie_electro_tech&f=Ingenierie_meca_aero&f=Ingenierie_telecom&f=Marketing_com_graphisme&f=Production_gestion&f=Production_operateur&f=Qualite_securite_environnement\",\n      \"ouestfrance\": \"https://emploi.ouest-france.fr/recherche-emploi/?contract_type=CDI&date_bucket=Depuis+24h&locations=Hauts-de-France&salary_bucket_year=33+000+%E2%82%AC+et+plus\",\n      \"meteojob\": \"https://www.meteojob.com/jobsearch/offres-emploi?&typeContrat=CDI&salary_min=30000&regions=32&publication_period=1\",\n      \"cadreemploi\": \"https://www.cadreemploi.fr/emploi/recherche?term=&contract=CDI&salary=33000&location=Hauts-de-France&publication_period=1\"\n    },\n    \"urls_3j\": {\n      \"apec\": \"\",\n      \"hellowork\": \"https://www.hellowork.com/fr-fr/emploi/recherche.html?k=&k_autocomplete=&l=Hauts-de-France&l_autocomplete=http%3A%2F%2Fwww.rj.com%2Fcommun%2Flocalite%2Fregion%2F32&st=relevance&c=CDI&msa=30000&ray=20&d=d&et=Entreprises&f=Achat&f=Logistique_metiers_transport&f=Assistanat_admin_accueil&f=Dir_resp_centre_profit&f=Juridique_droit&f=RH_Personnel_Formation&f=BTP_gros_second_oeuvre&f=Bureau_etude_R_D&f=Commercial_technico_com&f=Commercial_particulier&f=Commercial_professionnel&f=Import_export_inter&f=Dir_management_resp&f=Ingenierie_agro_agri&f=Ingenierie_chimie_pharma_bio&f=Ingenierie_electro_tech&f=Ingenierie_meca_aero&f=Ingenierie_telecom&f=Marketing_com_graphisme&f=Production_gestion&f=Production_operateur&f=Qualite_securite_environnement\",\n      \"ouestfrance\": \"https://emploi.ouest-france.fr/recherche-emploi/?contract_type=CDI&date_bucket=Depuis+3+jours&locations=Hauts-de-France&salary_bucket_year=33+000+%E2%82%AC+et+plus\",\n      \"meteojob\": \"https://www.meteojob.com/jobsearch/offres-emploi?&typeContrat=CDI&salary_min=30000&regions=32&publication_period=3\",\n      \"cadreemploi\": \"https://www.cadreemploi.fr/emploi/recherche?term=&contract=CDI&salary=33000&location=Hauts-de-France&publication_period=3\"\n    }\n  },\n  \"9\": {\n    \"nom\": \"9. GRAND EST\",\n    \"urls_24h\": {\n      \"apec\": \"\",\n      \"hellowork\": \"https://www.hellowork.com/fr-fr/emploi/recherche.html?k=&k_autocomplete=&l=Grand+Est&l_autocomplete=http%3A%2F%2Fwww.rj.com%2Fcommun%2Flocalite%2Fregion%2F44&st=relevance&c=CDI&msa=30000&ray=20&d=h&et=Entreprises&f=Achat&f=Logistique_metiers_transport&f=Assistanat_admin_accueil&f=Dir_resp_centre_profit&f=Juridique_droit&f=RH_Personnel_Formation&f=BTP_gros_second_oeuvre&f=Bureau_etude_R_D&f=Commercial_technico_com&f=Commercial_particulier&f=Commercial_professionnel&f=Import_export_inter&f=Dir_management_resp&f=Ingenierie_agro_agri&f=Ingenierie_chimie_pharma_bio&f=Ingenierie_electro_tech&f=Ingenierie_meca_aero&f=Ingenierie_telecom&f=Marketing_com_graphisme&f=Production_gestion&f=Production_operateur&f=Qualite_securite_environnement\",\n      \"ouestfrance\": \"https://emploi.ouest-france.fr/recherche-emploi/?contract_type=CDI&date_bucket=Depuis+24h&locations=Grand+Est&salary_bucket_year=33+000+%E2%82%AC+et+plus\",\n      \"meteojob\": \"https://www.meteojob.com/jobsearch/offres-emploi?&typeContrat=CDI&salary_min=30000&regions=44&publication_period=1\",\n      \"cadreemploi\": \"https://www.cadreemploi.fr/emploi/recherche?term=&contract=CDI&salary=33000&location=Grand+Est&publication_period=1\"\n    },\n    \"urls_3j\": {\n      \"apec\": \"\",\n      \"hellowork\": \"https://www.hellowork.com/fr-fr/emploi/recherche.html?k=&k_autocomplete=&l=Grand+Est&l_autocomplete=http%3A%2F%2Fwww.rj.com%2Fcommun%2Flocalite%2Fregion%2F44&st=relevance&c=CDI&msa=30000&ray=20&d=d&et=Entreprises&f=Achat&f=Logistique_metiers_transport&f=Assistanat_admin_accueil&f=Dir_resp_centre_profit&f=Juridique_droit&f=RH_Personnel_Formation&f=BTP_gros_second_oeuvre&f=Bureau_etude_R_D&f=Commercial_technico_com&f=Commercial_particulier&f=Commercial_professionnel&f=Import_export_inter&f=Dir_management_resp&f=Ingenierie_agro_agri&f=Ingenierie_chimie_pharma_bio&f=Ingenierie_electro_tech&f=Ingenierie_meca_aero&f=Ingenierie_telecom&f=Marketing_com_graphisme&f=Production_gestion&f=Production_operateur&f=Qualite_securite_environnement\",\n      \"ouestfrance\": \"https://emploi.ouest-france.fr/recherche-emploi/?contract_type=CDI&date_bucket=Depuis+3+jours&locations=Grand+Est&salary_bucket_year=33+000+%E2%82%AC+et+plus\",\n      \"meteojob\": \"https://www.meteojob.com/jobsearch/offres-emploi?&typeContrat=CDI&salary_min=30000&regions=44&publication_period=3\",\n      \"cadreemploi\": \"https://www.cadreemploi.fr/emploi/recherche?term=&contract=CDI&salary=33000&location=Grand+Est&publication_period=3\"\n    }\n  },\n  \"10\": {\n    \"nom\": \"10. PACA\",\n    \"urls_24h\": {\n      \"apec\": \"\",\n      \"hellowork\": \"https://www.hellowork.com/fr-fr/emploi/recherche.html?k=&k_autocomplete=&l=Provence-Alpes-C%C3%B4te+d%27Azur&l_autocomplete=http%3A%2F%2Fwww.rj.com%2Fcommun%2Flocalite%2Fregion%2F93&st=relevance&c=CDI&msa=30000&ray=20&d=h&et=Entreprises&f=Achat&f=Logistique_metiers_transport&f=Assistanat_admin_accueil&f=Dir_resp_centre_profit&f=Juridique_droit&f=RH_Personnel_Formation&f=BTP_gros_second_oeuvre&f=Bureau_etude_R_D&f=Commercial_technico_com&f=Commercial_particulier&f=Commercial_professionnel&f=Import_export_inter&f=Dir_management_resp&f=Ingenierie_agro_agri&f=Ingenierie_chimie_pharma_bio&f=Ingenierie_electro_tech&f=Ingenierie_meca_aero&f=Ingenierie_telecom&f=Marketing_com_graphisme&f=Production_gestion&f=Production_operateur&f=Qualite_securite_environnement\",\n      \"ouestfrance\": \"https://emploi.ouest-france.fr/recherche-emploi/?contract_type=CDI&date_bucket=Depuis+24h&locations=Provence-Alpes-C%C3%B4te+d%27Azur&salary_bucket_year=33+000+%E2%82%AC+et+plus\",\n      \"meteojob\": \"https://www.meteojob.com/jobsearch/offres-emploi?&typeContrat=CDI&salary_min=30000&regions=93&publication_period=1\",\n      \"cadreemploi\": \"https://www.cadreemploi.fr/emploi/recherche?term=&contract=CDI&salary=33000&location=Provence-Alpes-C%C3%B4te+d%27Azur&publication_period=1\"\n    },\n    \"urls_3j\": {\n      \"apec\": \"\",\n      \"hellowork\": \"https://www.hellowork.com/fr-fr/emploi/recherche.html?k=&k_autocomplete=&l=Provence-Alpes-C%C3%B4te+d%27Azur&l_autocomplete=http%3A%2F%2Fwww.rj.com%2Fcommun%2Flocalite%2Fregion%2F93&st=relevance&c=CDI&msa=30000&ray=20&d=d&et=Entreprises&f=Achat&f=Logistique_metiers_transport&f=Assistanat_admin_accueil&f=Dir_resp_centre_profit&f=Juridique_droit&f=RH_Personnel_Formation&f=BTP_gros_second_oeuvre&f=Bureau_etude_R_D&f=Commercial_technico_com&f=Commercial_particulier&f=Commercial_professionnel&f=Import_export_inter&f=Dir_management_resp&f=Ingenierie_agro_agri&f=Ingenierie_chimie_pharma_bio&f=Ingenierie_electro_tech&f=Ingenierie_meca_aero&f=Ingenierie_telecom&f=Marketing_com_graphisme&f=Production_gestion&f=Production_operateur&f=Qualite_securite_environnement\",\n      \"ouestfrance\": \"https://emploi.ouest-france.fr/recherche-emploi/?contract_type=CDI&date_bucket=Depuis+3+jours&locations=Provence-Alpes-C%C3%B4te+d%27Azur&salary_bucket_year=33+000+%E2%82%AC+et+plus\",\n      \"meteojob\": \"https://www.meteojob.com/jobsearch/offres-emploi?&typeContrat=CDI&salary_min=30000&regions=93&publication_period=3\",\n      \"cadreemploi\": \"https://www.cadreemploi.fr/emploi/recherche?term=&contract=CDI&salary=33000&location=Provence-Alpes-C%C3%B4te+d%27Azur&publication_period=3\"\n    }\n  },\n  \"11\": {\n    \"nom\": \"11. OCCITANIE\",\n    \"urls_24h\": {\n      \"apec\": \"\",\n      \"hellowork\": \"https://www.hellowork.com/fr-fr/emploi/recherche.html?k=&k_autocomplete=&l=Occitanie&l_autocomplete=http%3A%2F%2Fwww.rj.com%2Fcommun%2Flocalite%2Fregion%2F76&st=relevance&c=CDI&msa=30000&ray=20&d=h&et=Entreprises&f=Achat&f=Logistique_metiers_transport&f=Assistanat_admin_accueil&f=Dir_resp_centre_profit&f=Juridique_droit&f=RH_Personnel_Formation&f=BTP_gros_second_oeuvre&f=Bureau_etude_R_D&f=Commercial_technico_com&f=Commercial_particulier&f=Commercial_professionnel&f=Import_export_inter&f=Dir_management_resp&f=Ingenierie_agro_agri&f=Ingenierie_chimie_pharma_bio&f=Ingenierie_electro_tech&f=Ingenierie_meca_aero&f=Ingenierie_telecom&f=Marketing_com_graphisme&f=Production_gestion&f=Production_operateur&f=Qualite_securite_environnement\",\n      \"ouestfrance\": \"https://emploi.ouest-france.fr/recherche-emploi/?contract_type=CDI&date_bucket=Depuis+24h&locations=Occitanie&salary_bucket_year=33+000+%E2%82%AC+et+plus\",\n      \"meteojob\": \"https://www.meteojob.com/jobsearch/offres-emploi?&typeContrat=CDI&salary_min=30000&regions=76&publication_period=1\",\n      \"cadreemploi\": \"https://www.cadreemploi.fr/emploi/recherche?term=&contract=CDI&salary=33000&location=Occitanie&publication_period=1\"\n    },\n    \"urls_3j\": {\n      \"apec\": \"\",\n      \"hellowork\": \"https://www.hellowork.com/fr-fr/emploi/recherche.html?k=&k_autocomplete=&l=Occitanie&l_autocomplete=http%3A%2F%2Fwww.rj.com%2Fcommun%2Flocalite%2Fregion%2F76&st=relevance&c=CDI&msa=30000&ray=20&d=d&et=Entreprises&f=Achat&f=Logistique_metiers_transport&f=Assistanat_admin_accueil&f=Dir_resp_centre_profit&f=Juridique_droit&f=RH_Personnel_Formation&f=BTP_gros_second_oeuvre&f=Bureau_etude_R_D&f=Commercial_technico_com&f=Commercial_particulier&f=Commercial_professionnel&f=Import_export_inter&f=Dir_management_resp&f=Ingenierie_agro_agri&f=Ingenierie_chimie_pharma_bio&f=Ingenierie_electro_tech&f=Ingenierie_meca_aero&f=Ingenierie_telecom&f=Marketing_com_graphisme&f=Production_gestion&f=Production_operateur&f=Qualite_securite_environnement\",\n      \"ouestfrance\": \"https://emploi.ouest-france.fr/recherche-emploi/?contract_type=CDI&date_bucket=Depuis+3+jours&locations=Occitanie&salary_bucket_year=33+000+%E2%82%AC+et+plus\",\n      \"meteojob\": \"https://www.meteojob.com/jobsearch/offres-emploi?&typeContrat=CDI&salary_min=30000&regions=76&publication_period=3\",\n      \"cadreemploi\": \"https://www.cadreemploi.fr/emploi/recherche?term=&contract=CDI&salary=33000&location=Occitanie&publication_period=3\"\n    }\n  },\n  \"12\": {\n    \"nom\": \"12. BOURGOGNE FRANCHE COMTE\",\n    \"urls_24h\": {\n      \"apec\": \"\",\n      \"hellowork\": \"https://www.hellowork.com/fr-fr/emploi/recherche.html?k=&k_autocomplete=&l=Bourgogne-Franche-Comt%C3%A9&l_autocomplete=http%3A%2F%2Fwww.rj.com%2Fcommun%2Flocalite%2Fregion%2F27&st=relevance&c=CDI&msa=30000&ray=20&d=h&et=Entreprises&f=Achat&f=Logistique_metiers_transport&f=Assistanat_admin_accueil&f=Dir_resp_centre_profit&f=Juridique_droit&f=RH_Personnel_Formation&f=BTP_gros_second_oeuvre&f=Bureau_etude_R_D&f=Commercial_technico_com&f=Commercial_particulier&f=Commercial_professionnel&f=Import_export_inter&f=Dir_management_resp&f=Ingenierie_agro_agri&f=Ingenierie_chimie_pharma_bio&f=Ingenierie_electro_tech&f=Ingenierie_meca_aero&f=Ingenierie_telecom&f=Marketing_com_graphisme&f=Production_gestion&f=Production_operateur&f=Qualite_securite_environnement\",\n      \"ouestfrance\": \"https://emploi.ouest-france.fr/recherche-emploi/?contract_type=CDI&date_bucket=Depuis+24h&locations=Bourgogne-Franche-Comt%C3%A9&salary_bucket_year=33+000+%E2%82%AC+et+plus\",\n      \"meteojob\": \"https://www.meteojob.com/jobsearch/offres-emploi?&typeContrat=CDI&salary_min=30000&regions=27&publication_period=1\",\n      \"cadreemploi\": \"https://www.cadreemploi.fr/emploi/recherche?term=&contract=CDI&salary=33000&location=Bourgogne-Franche-Comt%C3%A9&publication_period=1\"\n    },\n    \"urls_3j\": {\n      \"apec\": \"\",\n      \"hellowork\": \"https://www.hellowork.com/fr-fr/emploi/recherche.html?k=&k_autocomplete=&l=Bourgogne-Franche-Comt%C3%A9&l_autocomplete=http%3A%2F%2Fwww.rj.com%2Fcommun%2Flocalite%2Fregion%2F27&st=relevance&c=CDI&msa=30000&ray=20&d=d&et=Entreprises&f=Achat&f=Logistique_metiers_transport&f=Assistanat_admin_accueil&f=Dir_resp_centre_profit&f=Juridique_droit&f=RH_Personnel_Formation&f=BTP_gros_second_oeuvre&f=Bureau_etude_R_D&f=Commercial_technico_com&f=Commercial_particulier&f=Commercial_professionnel&f=Import_export_inter&f=Dir_management_resp&f=Ingenierie_agro_agri&f=Ingenierie_chimie_pharma_bio&f=Ingenierie_electro_tech&f=Ingenierie_meca_aero&f=Ingenierie_telecom&f=Marketing_com_graphisme&f=Production_gestion&f=Production_operateur&f=Qualite_securite_environnement\",\n      \"ouestfrance\": \"https://emploi.ouest-france.fr/recherche-emploi/?contract_type=CDI&date_bucket=Depuis+3+jours&locations=Bourgogne-Franche-Comt%C3%A9&salary_bucket_year=33+000+%E2%82%AC+et+plus\",\n      \"meteojob\": \"https://www.meteojob.com/jobsearch/offres-emploi?&typeContrat=CDI&salary_min=30000&regions=27&publication_period=3\",\n      \"cadreemploi\": \"https://www.cadreemploi.fr/emploi/recherche?term=&contract=CDI&salary=33000&location=Bourgogne-Franche-Comt%C3%A9&publication_period=3\"\n    }\n  }\n};\n\n// Config of the selected region\nconst regionConfig = config[regionNumber];\nconst urls = regionConfig[urlType];\n\n// Return the URLs for the scrapers\nreturn {\n  json: {\n    region_number: regionNumber,\n    region_name: regionConfig.nom,\n    region: regionNumber,\n    url_type: urlType,\n    url_apec: urls.apec,\n    url_hellowork: urls.hellowork,\n    url_ouestfrance: urls.ouestfrance,\n    url_meteojob: urls.meteojob,\n    url_cadreemploi: urls.cadreemploi,\n    REGION: regionText\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -912,
+        640
+      ],
+      "id": "20b7e567-4264-4ac0-b605-8ccf20fdff28",
+      "name": "Region Config & Search URLs"
+    },
+    {
+      "parameters": {
+        "url": "http://host.docker.internal:9999/open/progression",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        -528,
+        1280
+      ],
+      "id": "51375d20-ebbc-43e7-b648-3e461a79bf77",
+      "name": "Open Progress Dashboard",
+      "onError": "continueRegularOutput",
+      "notes": "Optional helper: asks a tiny host-side service to open the live progress page."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8080/scrape-meteojob",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"url\":\"{{ $json.url_meteojob }}\",\n  \"region_num\":\"{{ $json.REGION }}\"\n}",
+        "options": {
+          "timeout": 2147483647
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        0,
+        672
+      ],
+      "id": "c7cff46e-643e-4616-a50d-d1ff975af929",
+      "name": "Scrape Meteojob",
+      "notes": "Calls the local Flask/Playwright backend (see docs/backend-api.md)."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8080/scrape-cadreemploi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"url\":\"{{ $json.url_cadreemploi }}\",\n  \"region_num\":\"{{ $json.REGION }}\"\n}",
+        "options": {
+          "timeout": 2147483647
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        0,
+        896
+      ],
+      "id": "ff8005ff-cdca-4007-93e5-f931e6ececcd",
+      "name": "Scrape Cadremploi",
+      "notes": "Calls the local Flask/Playwright backend (see docs/backend-api.md)."
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -1712,
+        480
+      ],
+      "id": "d5b5a343-44d5-4226-a526-500ec67518e3",
+      "name": "Manual Trigger"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "region-assignment-001",
+              "name": "REGION",
+              "value": "2. BRETAGNE",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -1232,
+        480
+      ],
+      "id": "257931ae-5340-4468-a0ac-255ba0f2250d",
+      "name": "Select Region (manual run)"
+    }
+  ],
+  "connections": {
+    "Dedupe by Company & Pre-filter": {
+      "main": [
+        [
+          {
+            "node": "Split Offers",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Screening (DeepSeek)": {
+      "main": [
+        [
+          {
+            "node": "Attach AI Decision",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Existing Client Check (optional, disabled)": {
+      "main": [
+        [
+          {
+            "node": "Normalize Fields (client check)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Offers": {
+      "main": [
+        [
+          {
+            "node": "AI Screening (DeepSeek)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Not an Existing Client? (optional, disabled)": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Monthly Dedupe Check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Monthly Dedupe Check": {
+      "main": [
+        [
+          {
+            "node": "Normalize Fields (monthly check)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Decision = KEEP?": {
+      "main": [
+        [
+          {
+            "node": "Existing Client Check (optional, disabled)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "New This Month?": {
+      "main": [
+        [
+          {
+            "node": "Export Offers to PDF (batch)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Attach AI Decision": {
+      "main": [
+        [
+          {
+            "node": "AI Decision = KEEP?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Fields (monthly check)": {
+      "main": [
+        [
+          {
+            "node": "New This Month?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Fields (client check)": {
+      "main": [
+        [
+          {
+            "node": "Not an Existing Client? (optional, disabled)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Export Offers to PDF (batch)": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Run Stats (disabled)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aggregate Run Stats (disabled)": {
+      "main": [
+        [
+          {
+            "node": "Create Run Report (disabled)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Scrape APEC (disabled)": {
+      "main": [
+        [
+          {
+            "node": "Merge Offer Lists",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Scrape HelloWork": {
+      "main": [
+        [
+          {
+            "node": "Merge Offer Lists",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge Offer Lists": {
+      "main": [
+        [
+          {
+            "node": "Dedupe by Company & Pre-filter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Scrape Ouest-France Emploi": {
+      "main": [
+        [
+          {
+            "node": "Merge Offer Lists",
+            "type": "main",
+            "index": 2
+          }
+        ]
+      ]
+    },
+    "Webhook Trigger": {
+      "main": [
+        [
+          {
+            "node": "Region Config & Search URLs",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Open Progress Dashboard",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Region Config & Search URLs": {
+      "main": [
+        [
+          {
+            "node": "Scrape APEC (disabled)",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Scrape Ouest-France Emploi",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Scrape HelloWork",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Scrape Meteojob",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Scrape Cadremploi",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Open Progress Dashboard": {
+      "main": [
+        []
+      ]
+    },
+    "Scrape Meteojob": {
+      "main": [
+        [
+          {
+            "node": "Merge Offer Lists",
+            "type": "main",
+            "index": 3
+          }
+        ]
+      ]
+    },
+    "Scrape Cadremploi": {
+      "main": [
+        [
+          {
+            "node": "Merge Offer Lists",
+            "type": "main",
+            "index": 4
+          }
+        ]
+      ]
+    },
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Select Region (manual run)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Select Region (manual run)": {
+      "main": [
+        [
+          {
+            "node": "Region Config & Search URLs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "meta": {
+    "templateCredsSetupCompleted": false
+  }
+}
